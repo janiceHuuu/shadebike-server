@@ -274,34 +274,63 @@ def build_route_geometry(path):
         if not geom:
             continue
 
-        # 判斷 geometry 方向是否跟 path 方向一致
-        start_geom = geom[0]
-        end_geom = geom[-1]
-
         u_info = nodes[u]
+        v_info = nodes[v]
 
-        d_start_to_u = haversine_m(
-            start_geom[0], start_geom[1],
-            u_info["lat"], u_info["lon"]
-        )
+        # 找 geometry 裡最接近 u node 的點
+        u_index = 0
+        u_min_dist = float("inf")
 
-        d_end_to_u = haversine_m(
-            end_geom[0], end_geom[1],
-            u_info["lat"], u_info["lon"]
-        )
+        # 找 geometry 裡最接近 v node 的點
+        v_index = 0
+        v_min_dist = float("inf")
 
-        # 如果線段尾端比較接近 u，代表 geometry 方向反了，要反轉
-        if d_end_to_u < d_start_to_u:
-            geom = list(reversed(geom))
+        for idx, pt in enumerate(geom):
+            pt_lat = pt[0]
+            pt_lon = pt[1]
 
-        # 避免相鄰線段接點重複
-        if len(full_geometry) > 0:
-            full_geometry.extend(geom[1:])
+            du = haversine_m(
+                pt_lat, pt_lon,
+                u_info["lat"], u_info["lon"]
+            )
+
+            dv = haversine_m(
+                pt_lat, pt_lon,
+                v_info["lat"], v_info["lon"]
+            )
+
+            if du < u_min_dist:
+                u_min_dist = du
+                u_index = idx
+
+            if dv < v_min_dist:
+                v_min_dist = dv
+                v_index = idx
+
+        # 只取 u 到 v 中間的那一段 geometry
+        if u_index <= v_index:
+            clipped = geom[u_index:v_index + 1]
         else:
-            full_geometry.extend(geom)
+            clipped = list(reversed(geom[v_index:u_index + 1]))
+
+        # 如果裁切後點太少，至少用 u/v 節點補成一條線
+        if len(clipped) < 2:
+            clipped = [
+                [u_info["lat"], u_info["lon"]],
+                [v_info["lat"], v_info["lon"]]
+            ]
+        else:
+            # 強制第一點與最後一點貼到 node 座標，避免超出 S/E
+            clipped[0] = [u_info["lat"], u_info["lon"]]
+            clipped[-1] = [v_info["lat"], v_info["lon"]]
+
+        # 接到總路線，避免接縫點重複
+        if len(full_geometry) > 0:
+            full_geometry.extend(clipped[1:])
+        else:
+            full_geometry.extend(clipped)
 
     return full_geometry
-
 
 # =========================
 # 4. /route API
