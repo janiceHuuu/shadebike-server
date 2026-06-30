@@ -17,9 +17,11 @@ latest_cmd = {
     "dir": ""
 }
 
+
 @app.route("/")
 def home():
     return "ShadeBike command server is running."
+
 
 @app.route("/set")
 def set_command():
@@ -44,9 +46,11 @@ def set_command():
         "dir": latest_cmd["dir"]
     })
 
+
 @app.route("/get")
 def get_command():
     return jsonify(latest_cmd)
+
 
 @app.route("/get_plain")
 def get_plain():
@@ -58,6 +62,7 @@ def get_plain():
 # =========================
 
 NODE_FILE = "node_new.geojson"
+
 ROAD_FILES = {
     "8AM": "校內路網_8AM_完成.geojson",
     "5PM": "校內路網_5PM_完成.geojson"
@@ -221,7 +226,7 @@ def load_road_network(time_slot, road_file):
 
         road_id = int(p["FID"])
 
-        # 這次新版資料已經可以直接對 node_new.geojson 的 FID
+        # 新版資料已經可以直接對 node_new.geojson 的 FID
         # 不要再 -1
         start_node = int(p["start_node"])
         final_node = int(p["final_node"])
@@ -660,6 +665,52 @@ def build_route_geometry_from_temp_graph(G_temp, path):
     return full_geometry
 
 
+def trim_route_geometry_to_start_end(route_geometry, start_snap, dest_snap):
+    if not route_geometry or len(route_geometry) < 2:
+        return route_geometry
+
+    start_pt = [start_snap["lat"], start_snap["lon"]]
+    end_pt = [dest_snap["lat"], dest_snap["lon"]]
+
+    start_index = 0
+    start_min_dist = float("inf")
+
+    end_index = len(route_geometry) - 1
+    end_min_dist = float("inf")
+
+    for i, pt in enumerate(route_geometry):
+        d_start = haversine_m(
+            pt[0], pt[1],
+            start_snap["lat"], start_snap["lon"]
+        )
+
+        d_end = haversine_m(
+            pt[0], pt[1],
+            dest_snap["lat"], dest_snap["lon"]
+        )
+
+        if d_start < start_min_dist:
+            start_min_dist = d_start
+            start_index = i
+
+        if d_end < end_min_dist:
+            end_min_dist = d_end
+            end_index = i
+
+    if start_index <= end_index:
+        trimmed = route_geometry[start_index:end_index + 1]
+    else:
+        trimmed = list(reversed(route_geometry[end_index:start_index + 1]))
+
+    if len(trimmed) < 2:
+        trimmed = [start_pt, end_pt]
+    else:
+        trimmed[0] = start_pt
+        trimmed[-1] = end_pt
+
+    return trimmed
+
+
 def build_edge_info(G_temp, path):
     edge_info = []
 
@@ -774,6 +825,14 @@ def route():
 
     route_points = build_route_points(G_temp, path)
     route_geometry = build_route_geometry_from_temp_graph(G_temp, path)
+
+    # 重要：裁切 route_geometry，避免藍線超過 S 或 E
+    route_geometry = trim_route_geometry_to_start_end(
+        route_geometry,
+        start_snap,
+        dest_snap
+    )
+
     edge_info = build_edge_info(G_temp, path)
 
     return jsonify({
