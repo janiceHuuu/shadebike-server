@@ -64,6 +64,15 @@ nodes = {}
 G_8AM = nx.Graph()
 
 
+def web_mercator_to_lonlat(x, y):
+    lon = x / 20037508.34 * 180
+    lat = y / 20037508.34 * 180
+    lat = 180 / math.pi * (
+        2 * math.atan(math.exp(lat * math.pi / 180)) - math.pi / 2
+    )
+    return lon, lat
+
+
 def load_nodes():
     global nodes
 
@@ -112,14 +121,25 @@ def load_road_network():
             })
             continue
 
-        # 這裡用無向圖，代表道路兩方向都可通行
+        # 讀取道路線段 geometry
+        coords_3857 = feature["geometry"]["coordinates"]
+
+        geometry_lonlat = []
+        for coord in coords_3857:
+            x = coord[0]
+            y = coord[1]
+            lon, lat = web_mercator_to_lonlat(x, y)
+            geometry_lonlat.append([lat, lon])  # Leaflet 使用 [lat, lon]
+
+        # 無向圖：代表道路兩方向都可以走
         G_8AM.add_edge(
             start_node,
             final_node,
             weight=cost,
             road_id=road_id,
             length_m=length_m,
-            cost=cost
+            cost=cost,
+            geometry=geometry_lonlat
         )
 
         edge_count += 1
@@ -205,7 +225,7 @@ def decide_action(prev_node, current_node, next_node):
 
     diff = angle_diff_deg(b1, b2)
 
-    # 角度門檻可以之後再調
+    # 角度門檻之後可以再調
     if diff > 35:
         return "R"
     elif diff < -35:
@@ -235,6 +255,52 @@ def build_route_points(path):
         })
 
     return route
+
+
+def build_route_geometry(path):
+    full_geometry = []
+
+    for i in range(len(path) - 1):
+        u = path[i]
+        v = path[i + 1]
+
+        edge_data = G_8AM.get_edge_data(u, v)
+
+        if edge_data is None:
+            continue
+
+        geom = edge_data.get("geometry", [])
+
+        if not geom:
+            continue
+
+        # 判斷 geometry 方向是否跟 path 方向一致
+        start_geom = geom[0]
+        end_geom = geom[-1]
+
+        u_info = nodes[u]
+
+        d_start_to_u = haversine_m(
+            start_geom[0], start_geom[1],
+            u_info["lat"], u_info["lon"]
+        )
+
+        d_end_to_u = haversine_m(
+            end_geom[0], end_geom[1],
+            u_info["lat"], u_info["lon"]
+        )
+
+        # 如果線段尾端比較接近 u，代表 geometry 方向反了，要反轉
+        if d_end_to_u < d_start_to_u:
+            geom = list(reversed(geom))
+
+        # 避免相鄰線段接點重複
+        if len(full_geometry) > 0:
+            full_geometry.extend(geom[1:])
+        else:
+            full_geometry.extend(geom)
+
+    return full_geometry
 
 
 # =========================
@@ -287,6 +353,7 @@ def route():
         }), 400
 
     route_points = build_route_points(path)
+    route_geometry = build_route_geometry(path)
 
     return jsonify({
         "ok": True,
@@ -297,7 +364,8 @@ def route():
         "dest_distance_m": dest_dist,
         "node_path": path,
         "total_cost": total_cost,
-        "route": route_points
+        "route": route_points,
+        "route_geometry": route_geometry
     })
 
 
