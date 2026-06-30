@@ -638,12 +638,16 @@ def build_route_geometry_from_temp_graph(G_temp, path):
 
         geom = edge_data.get("geometry", [])
 
-        if not geom:
+        if not geom or len(geom) < 2:
             continue
 
-        # 確保 geometry 方向是 u -> v
-        u_lat, u_lon = get_node_position(G_temp, u)
+        # 複製一份，避免改到 graph 原始 geometry
+        geom = [list(pt) for pt in geom]
 
+        u_lat, u_lon = get_node_position(G_temp, u)
+        v_lat, v_lon = get_node_position(G_temp, v)
+
+        # 確保 geometry 方向是 u -> v
         d_start_to_u = haversine_m(
             geom[0][0], geom[0][1],
             u_lat, u_lon
@@ -657,58 +661,18 @@ def build_route_geometry_from_temp_graph(G_temp, path):
         if d_end_to_u < d_start_to_u:
             geom = list(reversed(geom))
 
+        # 重要：
+        # 強制每一段 geometry 的起點、終點對齊 path 的 u、v
+        # 避免藍線跳過中間節點，例如 4 -> E
+        geom[0] = [u_lat, u_lon]
+        geom[-1] = [v_lat, v_lon]
+
         if len(full_geometry) > 0:
             full_geometry.extend(geom[1:])
         else:
             full_geometry.extend(geom)
 
     return full_geometry
-
-
-def trim_route_geometry_to_start_end(route_geometry, start_snap, dest_snap):
-    if not route_geometry or len(route_geometry) < 2:
-        return route_geometry
-
-    start_pt = [start_snap["lat"], start_snap["lon"]]
-    end_pt = [dest_snap["lat"], dest_snap["lon"]]
-
-    start_index = 0
-    start_min_dist = float("inf")
-
-    end_index = len(route_geometry) - 1
-    end_min_dist = float("inf")
-
-    for i, pt in enumerate(route_geometry):
-        d_start = haversine_m(
-            pt[0], pt[1],
-            start_snap["lat"], start_snap["lon"]
-        )
-
-        d_end = haversine_m(
-            pt[0], pt[1],
-            dest_snap["lat"], dest_snap["lon"]
-        )
-
-        if d_start < start_min_dist:
-            start_min_dist = d_start
-            start_index = i
-
-        if d_end < end_min_dist:
-            end_min_dist = d_end
-            end_index = i
-
-    if start_index <= end_index:
-        trimmed = route_geometry[start_index:end_index + 1]
-    else:
-        trimmed = list(reversed(route_geometry[end_index:start_index + 1]))
-
-    if len(trimmed) < 2:
-        trimmed = [start_pt, end_pt]
-    else:
-        trimmed[0] = start_pt
-        trimmed[-1] = end_pt
-
-    return trimmed
 
 
 def build_edge_info(G_temp, path):
@@ -825,14 +789,6 @@ def route():
 
     route_points = build_route_points(G_temp, path)
     route_geometry = build_route_geometry_from_temp_graph(G_temp, path)
-
-    # 重要：裁切 route_geometry，避免藍線超過 S 或 E
-    route_geometry = trim_route_geometry_to_start_end(
-        route_geometry,
-        start_snap,
-        dest_snap
-    )
-
     edge_info = build_edge_info(G_temp, path)
 
     return jsonify({
