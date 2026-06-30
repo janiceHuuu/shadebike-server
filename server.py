@@ -57,11 +57,14 @@ def get_plain():
 # 2. 路網資料讀取
 # =========================
 
-NODE_FILE = "node.geojson"
-ROAD_FILE_8AM = "校內路網_8AM_完成.geojson"
+NODE_FILE = "node_new.geojson"
+ROAD_FILES = {
+    "8AM": "校內路網_8AM_完成.geojson",
+    "5PM": "校內路網_5PM_完成.geojson"
+}
 
 nodes = {}
-G_8AM = nx.Graph()
+GRAPHS = {}
 
 START_VIRTUAL = "__start__"
 DEST_VIRTUAL = "__dest__"
@@ -97,11 +100,13 @@ def haversine_m(lat1, lon1, lat2, lon2):
 
 def polyline_length_m(geom):
     total = 0.0
+
     for i in range(len(geom) - 1):
         total += haversine_m(
             geom[i][0], geom[i][1],
             geom[i + 1][0], geom[i + 1][1]
         )
+
     return total
 
 
@@ -154,6 +159,7 @@ def slice_geometry_by_distance(geom, d1, d2):
     cum = cumulative_distances(geom)
 
     reverse = False
+
     if d1 > d2:
         d1, d2 = d2, d1
         reverse = True
@@ -184,6 +190,8 @@ def load_nodes():
     with open(NODE_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    nodes = {}
+
     for feature in data["features"]:
         p = feature["properties"]
 
@@ -199,10 +207,10 @@ def load_nodes():
     print(f"Loaded nodes: {len(nodes)}")
 
 
-def load_road_network():
-    global G_8AM
+def load_road_network(time_slot, road_file):
+    G = nx.Graph()
 
-    with open(ROAD_FILE_8AM, "r", encoding="utf-8") as f:
+    with open(road_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     edge_count = 0
@@ -212,6 +220,9 @@ def load_road_network():
         p = feature["properties"]
 
         road_id = int(p["FID"])
+
+        # 這次新版資料已經可以直接對 node_new.geojson 的 FID
+        # 不要再 -1
         start_node = int(p["start_node"])
         final_node = int(p["final_node"])
 
@@ -229,6 +240,7 @@ def load_road_network():
         coords_3857 = feature["geometry"]["coordinates"]
 
         geometry_lonlat = []
+
         for coord in coords_3857:
             x = coord[0]
             y = coord[1]
@@ -240,7 +252,6 @@ def load_road_network():
 
         # 確保 geometry 方向是 start_node -> final_node
         start_info = nodes[start_node]
-        final_info = nodes[final_node]
 
         d_geom_start_to_start_node = haversine_m(
             geometry_lonlat[0][0], geometry_lonlat[0][1],
@@ -263,16 +274,19 @@ def load_road_network():
         cost_per_m = cost / geom_length if geom_length > 0 else 1.0
 
         # 如果同一對 start/final 已經有 edge，保留 cost 較低的那條
-        if G_8AM.has_edge(start_node, final_node):
-            old_cost = G_8AM[start_node][final_node].get("cost", float("inf"))
+        if G.has_edge(start_node, final_node):
+            old_cost = G[start_node][final_node].get("cost", float("inf"))
+
             if old_cost <= cost:
                 continue
 
-        G_8AM.add_edge(
+        G.add_edge(
             start_node,
             final_node,
             weight=cost,
             road_id=road_id,
+            start_node=start_node,
+            final_node=final_node,
             length_m=length_m,
             geom_length_m=geom_length,
             cost=cost,
@@ -282,11 +296,27 @@ def load_road_network():
 
         edge_count += 1
 
-    print(f"Loaded 8AM road edges: {edge_count}")
+    print(f"Loaded {time_slot} road edges: {edge_count}")
 
     if missing_node_edges:
-        print("Missing node edges:")
+        print(f"Missing node edges in {time_slot}:")
         print(missing_node_edges)
+    else:
+        print(f"{time_slot}: all road edges match node_new.geojson")
+
+    return G
+
+
+def load_all_road_networks():
+    global GRAPHS
+
+    GRAPHS = {}
+
+    for time_slot, road_file in ROAD_FILES.items():
+        if os.path.exists(road_file):
+            GRAPHS[time_slot] = load_road_network(time_slot, road_file)
+        else:
+            print(f"Road file not found for {time_slot}: {road_file}")
 
 
 # =========================
@@ -349,10 +379,10 @@ def project_point_to_segment(point_lat, point_lon, a_lat, a_lon, b_lat, b_lon):
     }
 
 
-def find_nearest_point_on_edges(lat, lon):
+def find_nearest_point_on_edges(G, lat, lon):
     best = None
 
-    for u, v, data in G_8AM.edges(data=True):
+    for u, v, data in G.edges(data=True):
         geom = data.get("geometry", [])
 
         if len(geom) < 2:
@@ -547,7 +577,6 @@ def decide_action_by_coords(prev_pt, curr_pt, next_pt):
 
 def build_route_points(G_temp, path):
     route = []
-
     temp_points = []
 
     for node_id in path:
@@ -672,8 +701,19 @@ def route():
             "message": "Missing or invalid parameters. Use start_lat, start_lon, dest_lat, dest_lon."
         }), 400
 
-    start_snap = find_nearest_point_on_edges(start_lat, start_lon)
-    dest_snap = find_nearest_point_on_edges(dest_lat, dest_lon)
+    time_slot = request.args.get("time_slot", "8AM").upper()
+
+    if time_slot not in GRAPHS:
+        return jsonify({
+            "ok": False,
+            "message": f"Invalid or unavailable time_slot: {time_slot}. Use 8AM or 5PM.",
+            "available_time_slots": list(GRAPHS.keys())
+        }), 400
+
+    G_base = GRAPHS[time_slot]
+
+    start_snap = find_nearest_point_on_edges(G_base, start_lat, start_lon)
+    dest_snap = find_nearest_point_on_edges(G_base, dest_lat, dest_lon)
 
     if start_snap is None or dest_snap is None:
         return jsonify({
@@ -681,7 +721,7 @@ def route():
             "message": "Could not snap start or destination to road network."
         }), 400
 
-    G_temp = G_8AM.copy()
+    G_temp = G_base.copy()
 
     # 把原本 nodes 座標加進 graph node attributes
     for node_id, info in nodes.items():
@@ -713,17 +753,22 @@ def route():
         return jsonify({
             "ok": False,
             "message": "No path found between start snap and destination snap.",
+            "time_slot": time_slot,
             "start_snap": {
                 "lat": start_snap["lat"],
                 "lon": start_snap["lon"],
                 "distance_m": start_snap["distance_m"],
-                "road_id": start_snap["road_id"]
+                "road_id": start_snap["road_id"],
+                "edge_u": start_snap["u"],
+                "edge_v": start_snap["v"]
             },
             "dest_snap": {
                 "lat": dest_snap["lat"],
                 "lon": dest_snap["lon"],
                 "distance_m": dest_snap["distance_m"],
-                "road_id": dest_snap["road_id"]
+                "road_id": dest_snap["road_id"],
+                "edge_u": dest_snap["u"],
+                "edge_v": dest_snap["v"]
             }
         }), 400
 
@@ -733,7 +778,7 @@ def route():
 
     return jsonify({
         "ok": True,
-        "time_slot": "8AM",
+        "time_slot": time_slot,
 
         "start_snap": {
             "lat": start_snap["lat"],
@@ -768,7 +813,7 @@ def route():
 # =========================
 
 load_nodes()
-load_road_network()
+load_all_road_networks()
 
 
 if __name__ == "__main__":
